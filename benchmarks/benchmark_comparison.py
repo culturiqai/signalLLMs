@@ -22,12 +22,28 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
 
 # Import SignalLLM components
 from signalllm_hrfevo_poc import (
     Config, SignalLLM, FrequencyDomainAttention, FourierConvolutionAttention,
-    SpectralEmbedding, SpectralGapAnalyzer, SimpleTokenizer
+    SpectralEmbedding, SpectralGapAnalyzer, SimpleTokenizer, count_parameters
 )
+
+# Memory profiling
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("psutil not available. Memory usage benchmarks will be limited.")
+
+try:
+    import torch.cuda as cuda
+    CUDA_AVAILABLE = True
+except ImportError:
+    CUDA_AVAILABLE = False
+    print("CUDA not available. Using CPU only.")
 
 # Basic implementation of a standard Transformer for comparison
 class StandardTransformer(nn.Module):
@@ -85,10 +101,6 @@ class StandardTransformer(nn.Module):
         # Final linear layer
         logits = self.output_layer(output)
         return logits
-
-def count_parameters(model):
-    """Count the number of trainable parameters in a model"""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def benchmark_computational_complexity(model_type, seq_lengths, vocab_size=1000, embed_dim=256, num_heads=4, 
                                      num_layers=4, hidden_dim=1024, batch_size=32, device=None, num_runs=5):
@@ -324,16 +336,60 @@ def benchmark_parameter_efficiency(vocab_sizes, embed_dim=256, harmonic_bases=16
     return results
 
 def load_text_dataset(filepath, max_samples=1000):
-    """Load a text dataset for evaluation"""
-    if not os.path.exists(filepath):
-        print(f"Dataset file {filepath} not found. Creating dummy data.")
-        # Create dummy data if file doesn't exist
-        lines = ["This is a sample sentence for testing language models."] * max_samples
-    else:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            lines = f.readlines()[:max_samples]
+    """Load a text dataset from a file"""
+    if filepath is None or not os.path.exists(filepath):
+        # Create a synthetic dataset if no file is provided
+        logging.info("No dataset file provided. Creating synthetic dataset...")
+        synthetic_texts = []
+        
+        # Generate simple patterns for the model to learn
+        patterns = [
+            "The quick brown fox jumps over the lazy dog.",
+            "A journey of a thousand miles begins with a single step.",
+            "To be or not to be, that is the question.",
+            "All that glitters is not gold.",
+            "The early bird catches the worm.",
+            "Actions speak louder than words.",
+            "You can't teach an old dog new tricks.",
+            "Don't count your chickens before they hatch.",
+            "The pen is mightier than the sword.",
+            "When in Rome, do as the Romans do."
+        ]
+        
+        # Repeat patterns with variations to create a larger dataset
+        for i in range(max_samples):
+            pattern = patterns[i % len(patterns)]
+            
+            # Add some variations
+            if i % 3 == 0:
+                synthetic_texts.append(pattern)
+            elif i % 3 == 1:
+                # Split and rejoin with slight modification
+                words = pattern.split()
+                if len(words) > 5:
+                    mid = len(words) // 2
+                    synthetic_texts.append(' '.join(words[:mid]) + ' really ' + ' '.join(words[mid:]))
+                else:
+                    synthetic_texts.append(pattern)
+            else:
+                # Reverse the pattern
+                synthetic_texts.append(pattern[::-1])
+        
+        return synthetic_texts
     
-    return lines
+    # Load from file if provided
+    texts = []
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in f:
+                texts.append(line.strip())
+                if len(texts) >= max_samples:
+                    break
+    except Exception as e:
+        logging.error(f"Error loading dataset: {e}")
+        return []
+    
+    return texts
 
 def train_and_evaluate(model_type, dataset, epochs=1, batch_size=32, seq_length=64, 
                       vocab_size=1000, embed_dim=256, num_heads=4, num_layers=2, 

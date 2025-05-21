@@ -42,6 +42,12 @@ except ImportError:
     WAVELET_AVAILABLE = False
     print("PyWavelets not available. Using FFT-based transforms instead.")
 
+# For debugging, ensure PyWavelets is properly loaded
+if 'pywt' in sys.modules and WAVELET_AVAILABLE:
+    print(f"PyWavelets version: {pywt.__version__}")
+else:
+    print("WARNING: PyWavelets module not properly loaded. Using FFT-based transforms.")
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_AVAILABLE = True
@@ -477,47 +483,81 @@ class WaveletTransform(nn.Module):
         # For simplicity, transpose to handle each embedding dimension separately
         x = x.transpose(1, 2)  # [batch_size, embed_dim, seq_length]
         
-        # Create empty tensors for coefficients
-        approx = torch.zeros_like(x)
-        detail_coeffs = []
+        # Calculate expected coefficient sizes for consistency
+        # This helps ensure the inverse transform will work properly
+        try:
+            # Calculate coefficient length using pywt.dwt_coeff_len
+            filter_len = pywt.Wavelet(self.wavelet_type).dec_len
+            # dwt_coeff_len returns a single integer (the coefficient length)
+            approx_len = pywt.dwt_coeff_len(data_len=seq_length, filter_len=filter_len, mode=self.mode)
+            # Pre-calculate detail coefficient sizes for each level
+            detail_lens = []
+            current_len = seq_length
+            for i in range(self.levels):
+                current_len = pywt.dwt_coeff_len(data_len=current_len, filter_len=filter_len, mode=self.mode)
+                if i < self.levels - 1:  # Skip the final approximation
+                    detail_lens.append(current_len)
+            
+            max_approx_len = approx_len
+        except ValueError:
+            # If level is too high for the sequence length, reduce it
+            filter_len = pywt.Wavelet(self.wavelet_type).dec_len
+            adjusted_levels = pywt.dwt_max_level(data_len=seq_length, filter_len=filter_len)
+            logging.warning(f"Adjusting wavelet levels from {self.levels} to {adjusted_levels} for sequence length {seq_length}")
+            self.levels = adjusted_levels
+            
+            # dwt_coeff_len returns a single integer (the coefficient length)
+            approx_len = pywt.dwt_coeff_len(data_len=seq_length, filter_len=filter_len, mode=self.mode)
+            
+            # Pre-calculate detail coefficient sizes for each level
+            detail_lens = []
+            current_len = seq_length
+            for i in range(self.levels):
+                current_len = pywt.dwt_coeff_len(data_len=current_len, filter_len=filter_len, mode=self.mode)
+                if i < self.levels - 1:  # Skip the final approximation
+                    detail_lens.append(current_len)
+            
+            max_approx_len = approx_len
+        
+        # Create empty tensors for coefficients with proper sizes
+        approx = torch.zeros(batch_size, embed_dim, max_approx_len, device=x.device)
+        
+        # Initialize detail coefficient holders based on calculated detail_lens
+        detail_holders = []
+        for level_size in detail_lens:
+            detail_holders.append(torch.zeros(batch_size, embed_dim, level_size, device=x.device))
         
         # Process each batch and embedding dimension
         for b in range(batch_size):
             for e in range(embed_dim):
                 # Convert to numpy for PyWavelets
-                signal = x[b, e].cpu().numpy()
+                signal = x[b, e].detach().cpu().numpy()
                 
-                # Perform wavelet decomposition
-                coeffs = pywt.wavedec(signal, self.wavelet_type, mode=self.mode, level=self.levels)
-                
-                # Store approximation coefficients
-                approx_len = len(coeffs[0])
-                approx[b, e, :approx_len] = torch.tensor(coeffs[0], device=x.device)
-                
-                # Store detail coefficients
-                detail_batch = []
-                for level_coeff in coeffs[1:]:
-                    coeff_tensor = torch.zeros(seq_length, device=x.device)
-                    coeff_tensor[:len(level_coeff)] = torch.tensor(level_coeff, device=x.device)
-                    detail_batch.append(coeff_tensor)
-                
-                # Add batch detail coefficients to overall list
-                if b == 0 and e == 0:
-                    detail_coeffs = [[detail] for detail in detail_batch]
-                else:
-                    for i, detail in enumerate(detail_batch):
-                        detail_coeffs[i].append(detail)
-        
-        # Reshape detail coefficients into proper tensors
-        detail_tensors = []
-        for level_coeffs in detail_coeffs:
-            level_tensor = torch.stack(level_coeffs)
-            level_tensor = level_tensor.view(batch_size, embed_dim, -1)
-            detail_tensors.append(level_tensor)
+                try:
+                    # Perform wavelet decomposition
+                    coeffs = pywt.wavedec(signal, self.wavelet_type, mode=self.mode, level=self.levels)
+                    
+                    # Store approximation coefficients
+                    approx_coeff = coeffs[0]
+                    approx[b, e, :len(approx_coeff)] = torch.tensor(approx_coeff, device=x.device)
+                    
+                    # Store detail coefficients with proper sizes
+                    for i, level_coeff in enumerate(coeffs[1:]):
+                        if i < len(detail_holders):
+                            # Ensure coefficient has expected size
+                            expected_len = detail_lens[i] if i < len(detail_lens) else len(level_coeff)
+                            if len(level_coeff) > expected_len:
+                                level_coeff = level_coeff[:expected_len]
+                            
+                            # Store in the appropriate tensor
+                            detail_holders[i][b, e, :len(level_coeff)] = torch.tensor(level_coeff, device=x.device)
+                except Exception as e:
+                    logging.warning(f"Error in wavelet decomposition: {str(e)}. Using zero coefficients.")
+                    # Keep zeros in the tensors if decomposition fails
         
         # Convert back to original shape
         approx = approx.transpose(1, 2)  # [batch_size, seq_length, embed_dim]
-        detail_tensors = [d.transpose(1, 2) for d in detail_tensors]  # list of [batch_size, seq_length, embed_dim]
+        detail_tensors = [d.transpose(1, 2) for d in detail_holders]  # list of [batch_size, seq_length, embed_dim]
         
         return approx, detail_tensors
     
@@ -539,7 +579,9 @@ class WaveletTransform(nn.Module):
         details = [d.transpose(1, 2) for d in details]  # list of [batch_size, embed_dim, seq_length]
         
         # Get target sequence length (needs to be calculated from coefficients)
-        seq_length = approx.size(2) * (2 ** self.levels)
+        # Use wavelet-specific calculations for proper sequence length
+        approx_len = approx.size(2)
+        seq_length = approx_len * (2 ** len(details))
         
         # Create output tensor
         output = torch.zeros(batch_size, embed_dim, seq_length, device=approx.device)
@@ -548,28 +590,84 @@ class WaveletTransform(nn.Module):
         for b in range(batch_size):
             for e in range(embed_dim):
                 # Get approximation coefficients
-                approx_coeff = approx[b, e].cpu().numpy()
+                approx_coeff = approx[b, e].detach().cpu().numpy()
                 approx_coeff = approx_coeff[:approx_coeff.shape[0]]  # Remove padding
                 
                 # Get detail coefficients for each level
                 detail_coeffs = []
-                for level_detail in details:
-                    level_coeff = level_detail[b, e].cpu().numpy()
-                    # Find non-zero length
-                    idx = np.nonzero(level_coeff)[0]
-                    if len(idx) > 0:
-                        level_coeff = level_coeff[:idx[-1] + 1]
+                filter_len = pywt.Wavelet(self.wavelet_type).dec_len
+                
+                # Calculate expected sizes for each level
+                detail_sizes = []
+                current_len = approx_len
+                for _ in range(len(details)):
+                    next_len = pywt.dwt_coeff_len(data_len=current_len*2, filter_len=filter_len, mode=self.mode)
+                    detail_sizes.append(next_len)
+                    current_len = next_len
+                
+                # For each level
+                for level_idx, level_detail in enumerate(details):
+                    level_coeff = level_detail[b, e].detach().cpu().numpy()
+                    
+                    # Calculate expected size for this level
+                    if level_idx < len(detail_sizes):
+                        expected_size = detail_sizes[level_idx]
+                        # Ensure coefficients have the expected size
+                        if len(level_coeff) > expected_size:
+                            level_coeff = level_coeff[:expected_size]
+                        elif len(level_coeff) < expected_size:
+                            # Pad with zeros if needed
+                            padded = np.zeros(expected_size)
+                            padded[:len(level_coeff)] = level_coeff
+                            level_coeff = padded
+                    
                     detail_coeffs.append(level_coeff)
                 
                 # Combine for waverec
-                coeffs = [approx_coeff] + detail_coeffs
-                
-                # Perform inverse wavelet transform
-                rec = pywt.waverec(coeffs, self.wavelet_type, mode=self.mode)
-                
-                # Store result, handling potential length differences
-                rec_len = min(len(rec), seq_length)
-                output[b, e, :rec_len] = torch.tensor(rec[:rec_len], device=approx.device)
+                try:
+                    # Make sure coefficients are compatible
+                    coeffs = [approx_coeff] + detail_coeffs
+                    
+                    # Validate coefficient shapes
+                    # Calculate expected lengths for each level
+                    filter_len = pywt.Wavelet(self.wavelet_type).dec_len
+                    
+                    # Calculate expected sizes for each level
+                    expected_wavelet_shapes = []
+                    current_len = len(approx_coeff)
+                    for _ in range(len(detail_coeffs)):
+                        next_len = pywt.dwt_coeff_len(data_len=current_len*2, filter_len=filter_len, mode=self.mode)
+                        expected_wavelet_shapes.append(next_len)
+                        current_len = next_len
+                    
+                    # Fix shapes if needed
+                    for i in range(1, len(coeffs)):
+                        if i-1 < len(expected_wavelet_shapes):
+                            expected_len = expected_wavelet_shapes[i-1]
+                            current_len = len(coeffs[i])
+                            if current_len != expected_len:
+                                # Resize coefficient array to expected length
+                                new_coeff = np.zeros(expected_len)
+                                min_len = min(current_len, expected_len)
+                                new_coeff[:min_len] = coeffs[i][:min_len]
+                                coeffs[i] = new_coeff
+                    
+                    # Perform inverse wavelet transform
+                    rec = pywt.waverec(coeffs, self.wavelet_type, mode=self.mode)
+                    
+                    # Store result, handling potential length differences
+                    rec_len = min(len(rec), seq_length)
+                    output[b, e, :rec_len] = torch.tensor(rec[:rec_len], device=approx.device)
+                except ValueError as e:
+                    # Fallback to a simpler approach if coefficient shapes still mismatch
+                    logging.warning(f"Wavelet coefficient shape mismatch, using fallback method: {str(e)}")
+                    
+                    # Use FFT-based reconstruction as fallback
+                    fallback_output = self.fft_inverse(
+                        approx.transpose(1, 2), 
+                        [d.transpose(1, 2) for d in details]
+                    )
+                    return fallback_output
         
         # Transpose back
         output = output.transpose(1, 2)  # [batch_size, seq_length, embed_dim]
@@ -587,6 +685,16 @@ class WaveletTransform(nn.Module):
             approximation, detail_coefficients
         """
         batch_size, seq_length, embed_dim = x.shape
+        
+        # Ensure we have filter parameters initialized
+        # This could happen if WAVELET_AVAILABLE is True but using_pywt is manually set to False
+        if not hasattr(self, 'low_pass') or not hasattr(self, 'high_pass'):
+            if self.use_learned:
+                self.low_pass = nn.Parameter(torch.ones(1, 1, 32) * 0.7)
+                self.high_pass = nn.Parameter(torch.ones(1, 1, 32) * 0.3)
+            else:
+                self.register_buffer('low_pass', torch.ones(1, 1, 32) * 0.7)
+                self.register_buffer('high_pass', torch.ones(1, 1, 32) * 0.3)
         
         # Apply FFT
         x_fft = torch.fft.rfft(x, dim=1)
@@ -606,14 +714,11 @@ class WaveletTransform(nn.Module):
             x_fft_highpass = x_fft.clone()
             
             # Shape filters for proper broadcasting
-            if level < self.low_pass.size(2):
-                low_filter = torch.sigmoid(self.low_pass[:, :, level])
-                high_filter = torch.sigmoid(self.high_pass[:, :, level])
-            else:
-                # Use last filter if we have more levels than filter parameters
-                low_filter = torch.sigmoid(self.low_pass[:, :, -1])
-                high_filter = torch.sigmoid(self.high_pass[:, :, -1])
-                
+            # Use modulo to cycle through available filters if we have more levels than filter parameters
+            filter_idx = level % self.low_pass.size(2)
+            low_filter = torch.sigmoid(self.low_pass[:, :, filter_idx])
+            high_filter = torch.sigmoid(self.high_pass[:, :, filter_idx])
+            
             # Apply filters (simplified version)
             x_fft_lowpass[:, band_size:] = 0
             x_fft_highpass[:, :band_size] = 0
@@ -645,15 +750,31 @@ class WaveletTransform(nn.Module):
         Returns:
             Reconstructed signal [batch_size, seq_length, embed_dim]
         """
-        seq_length = approx.size(1)
+        batch_size, seq_length, embed_dim = approx.shape
         
         # Convert approximation to frequency domain
         x_fft = torch.fft.rfft(approx, dim=1)
         
-        # Add detail coefficients in frequency domain
+        # Add detail coefficients in frequency domain, handling different sizes
         for detail in details:
+            # Ensure detail has the same sequence length as approx using interpolation if needed
+            if detail.size(1) != seq_length:
+                detail = F.interpolate(
+                    detail.transpose(1, 2),  # [batch, embed, seq]
+                    size=seq_length,
+                    mode='linear',
+                    align_corners=False
+                ).transpose(1, 2)  # back to [batch, seq, embed]
+            
             detail_fft = torch.fft.rfft(detail, dim=1)
-            x_fft = x_fft + detail_fft
+            
+            # Ensure FFT outputs have the same size
+            min_freq_size = min(x_fft.size(1), detail_fft.size(1))
+            x_fft_trim = x_fft[:, :min_freq_size, :]
+            detail_fft_trim = detail_fft[:, :min_freq_size, :]
+            
+            # Add the frequency components
+            x_fft = x_fft_trim + detail_fft_trim
         
         # Inverse FFT to get reconstructed signal
         output = torch.fft.irfft(x_fft, n=seq_length, dim=1)
@@ -1056,104 +1177,102 @@ class FourierConvolutionAttention(nn.Module):
         
         # Track attention associativity metrics
         self.register_buffer('associativity_metrics', torch.zeros(3))
-    
-    def _calculate_associativity_metric(self, embeddings: torch.Tensor) -> float:
-        """
-        Calculate how well the attention operation satisfies associativity.
         
-        Theoretically, these operations should be identical for a true linear operator:
-        A(B(C(x))) == (A⋅B⋅C)(x)
+        # Add a shape tracker for debugging and analysis
+        self.register_buffer('shape_tracker', torch.zeros(3, dtype=torch.long))
+        
+    def _ensure_compatible_sizes(self, tensor1, tensor2, dim=1):
+        """
+        Ensure two tensors have compatible sizes along specified dimension
+        for element-wise operations.
         
         Args:
-            embeddings: Input embeddings [batch_size, seq_length, embed_dim]
+            tensor1: First tensor
+            tensor2: Second tensor
+            dim: Dimension to check and adjust
             
         Returns:
-            Associativity metric (0 = perfect associativity)
+            Tuple of adjusted tensors with same size along dim
         """
-        # Sample a small random subsample for efficiency
-        batch_size, seq_length, _ = embeddings.shape
-        sample_indices = torch.randperm(seq_length)[:min(10, seq_length)]
-        sample = embeddings[:, sample_indices]
+        size1 = tensor1.size(dim)
+        size2 = tensor2.size(dim)
         
-        # Project to Q, K, V spaces
-        q = self.q_proj(sample)
-        k = self.k_proj(sample)
-        v = self.v_proj(sample)
-        
-        # Define A, B, C as FFT transforms at different frequency bands
-        # These simulate different attention patterns
-        q_fft = torch.fft.rfft(q, dim=1)
-        k_fft = torch.fft.rfft(k, dim=1)
-        v_fft = torch.fft.rfft(v, dim=1)
-        
-        # Calculate operations in different orders
-        # First order: A(B(C(x)))
-        C_x = v_fft * k_fft  # Apply C
-        B_Cx = q_fft * C_x    # Apply B
-        A_BCx = torch.fft.irfft(B_Cx, n=sample.size(1), dim=1)  # Apply A
-        
-        # Second order: (A⋅B⋅C)(x) 
-        A_B_C = q_fft * k_fft * v_fft  # Combined operator
-        ABC_x = torch.fft.irfft(A_B_C, n=sample.size(1), dim=1)  # Apply combined
-        
-        # Calculate normalized difference (should be close to 0 for associativity)
-        diff = torch.norm(A_BCx - ABC_x) / (torch.norm(A_BCx) + 1e-8)
-        
-        return diff.item()
-    
+        if size1 == size2:
+            return tensor1, tensor2
+            
+        if size1 > size2:
+            # If tensor1 is bigger, truncate it
+            if dim == 1:
+                return tensor1[:, :size2], tensor2
+            elif dim == 2:
+                return tensor1[:, :, :size2], tensor2
+        else:
+            # If tensor2 is bigger, truncate it
+            if dim == 1:
+                return tensor1, tensor2[:, :size1]
+            elif dim == 2:
+                return tensor1, tensor2[:, :, :size1]
+                
+        return tensor1, tensor2  # Fallback case
+
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Compute attention via convolution in Fourier domain.
+        Forward pass implementing attention as convolution in Fourier space.
         
         Args:
-            x: Input tensor [batch_size, seq_length, embed_dim]
-            mask: Attention mask [batch_size, seq_length]
+            x: Input tensor of shape [batch_size, seq_len, embed_dim]
+            mask: Optional attention mask
             
         Returns:
-            Output tensor [batch_size, seq_length, embed_dim]
+            Output tensor of shape [batch_size, seq_len, embed_dim]
         """
         batch_size, seq_length, _ = x.shape
         
-        # Track ops for complexity analysis
-        if self.training:
-            # Standard attention: O(n²) operations per sequence
-            standard_ops = seq_length ** 2
-            # FFT ops: O(n log n) operations per sequence
-            fft_ops = seq_length * math.log2(seq_length) if seq_length > 1 else 1
-            self.op_count[0] = fft_ops / standard_ops
-            
-            # Periodically measure associativity
-            if random.random() < 0.1:  # 10% chance to measure
-                associativity = self._calculate_associativity_metric(x)
-                # Update running statistics (min, max, mean)
-                self.associativity_metrics[0] = min(self.associativity_metrics[0] or 1.0, associativity)
-                self.associativity_metrics[1] = max(self.associativity_metrics[1], associativity)
-                # Exponential moving average for mean
-                if self.associativity_metrics[2] == 0:
-                    self.associativity_metrics[2] = associativity
-                else:
-                    self.associativity_metrics[2] = 0.9 * self.associativity_metrics[2] + 0.1 * associativity
+        # Store original sequence length for shape tracking
+        self.shape_tracker[0] = seq_length
         
-        # Project queries, keys, values
-        q = self.q_proj(x).view(batch_size, seq_length, self.num_heads, self.head_dim)
-        k = self.k_proj(x).view(batch_size, seq_length, self.num_heads, self.head_dim)
-        v = self.v_proj(x).view(batch_size, seq_length, self.num_heads, self.head_dim)
+        # Project inputs to queries, keys, and values
+        q = self.q_proj(x)  # [batch, seq, embed_dim]
+        k = self.k_proj(x)  # [batch, seq, embed_dim]
+        v = self.v_proj(x)  # [batch, seq, embed_dim]
         
-        # Reshape for batch-wise operations
-        q = q.transpose(1, 2)  # [batch, heads, seq, dim]
+        # Reshape for multi-head attention
+        q = q.view(batch_size, seq_length, self.num_heads, self.head_dim)
+        k = k.view(batch_size, seq_length, self.num_heads, self.head_dim)
+        v = v.view(batch_size, seq_length, self.num_heads, self.head_dim)
+        
+        # [batch, seq, heads, dim] -> [batch, heads, seq, dim]
+        q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         
         # Instead of explicit attention, use circulant convolution
         # Step 1: Prepare convolution kernels from keys
-        conv_weights = torch.fft.rfft(self.conv_kernels.unsqueeze(0).repeat(batch_size, 1, 1), dim=2)
+        # Make sure kernel size matches sequence length
+        if self.conv_kernels.size(1) != seq_length:
+            # Pad or truncate kernels to match sequence length
+            padded_kernels = torch.zeros(self.num_heads, seq_length, device=self.conv_kernels.device)
+            kernel_len = min(self.conv_kernels.size(1), seq_length)
+            padded_kernels[:, :kernel_len] = self.conv_kernels[:, :kernel_len]
+            conv_weights = torch.fft.rfft(padded_kernels.unsqueeze(0).repeat(batch_size, 1, 1), dim=2)
+        else:
+            conv_weights = torch.fft.rfft(self.conv_kernels.unsqueeze(0).repeat(batch_size, 1, 1), dim=2)
+        
+        # Track FFT size for shape analysis
+        self.shape_tracker[1] = conv_weights.size(2)
         
         # Step 2: Apply the mask if provided (in Fourier space)
         if mask is not None:
-            # Convert mask to Fourier space
+            # Convert mask to Fourier space, ensuring compatible dimensions
             mask_fft = torch.fft.rfft(mask.float().unsqueeze(1), dim=1)  # [batch, 1, fft_size]
+            # Make sure shapes are compatible
+            mask_fft, conv_weights = self._ensure_compatible_sizes(
+                mask_fft.unsqueeze(-1), 
+                conv_weights, 
+                dim=2
+            )
             # Apply to convolution weights
-            conv_weights = conv_weights * mask_fft.unsqueeze(-1)
+            conv_weights = conv_weights * mask_fft
         
         # Step 3: Compute convolution for each head via FFT
         outputs = []
@@ -1162,17 +1281,54 @@ class FourierConvolutionAttention(nn.Module):
             v_fft = torch.fft.rfft(v[:, h], dim=1)  # [batch, fft_size, dim]
             
             # Apply frequency-domain filters (learnable)
-            filters = torch.sigmoid(self.freq_response[h]).unsqueeze(0).unsqueeze(-1)  # [1, fft_size, 1]
+            filters = torch.sigmoid(self.freq_response[h]).unsqueeze(0).unsqueeze(-1)
+            
+            # Ensure filters have compatible size with v_fft
+            v_fft_size = v_fft.size(1)
+            filter_size = filters.size(1)
+            
+            # Adjust filter size if needed
+            if filter_size != v_fft_size:
+                # Create properly sized filters
+                new_filters = torch.zeros(1, v_fft_size, 1, device=filters.device)
+                # Copy data from original filters, up to the minimum size
+                min_size = min(filter_size, v_fft_size)
+                new_filters[:, :min_size, :] = filters[:, :min_size, :]
+                filters = new_filters
+            
+            # Apply filters
             v_fft_filtered = v_fft * filters
             
             # Convolve with kernel (equivalent to attention) in Fourier space
             head_weights = conv_weights[:, h]  # [batch, fft_size]
-            # Enhance values based on query-key similarity via convolution
-            output_fft = v_fft_filtered * head_weights.unsqueeze(-1)
             
-            # Transform back to time domain
+            # Ensure head_weights and v_fft_filtered have compatible dimensions
+            head_weights, v_fft_filtered = self._ensure_compatible_sizes(
+                head_weights.unsqueeze(-1), 
+                v_fft_filtered, 
+                dim=1
+            )
+            
+            # Enhance values based on query-key similarity via convolution
+            output_fft = v_fft_filtered * head_weights
+            
+            # Transform back to time domain, ensuring output length matches input
             output = torch.fft.irfft(output_fft, n=seq_length, dim=1)
+            
+            # In case output length doesn't match (should be rare now)
+            if output.size(1) != seq_length:
+                # Create properly sized output
+                padded_output = torch.zeros(batch_size, seq_length, self.head_dim, device=output.device)
+                # Copy available data
+                min_len = min(output.size(1), seq_length)
+                padded_output[:, :min_len, :] = output[:, :min_len, :]
+                output = padded_output
+                
             outputs.append(output)
+        
+        # Track output shape for analysis
+        if outputs:
+            self.shape_tracker[2] = outputs[0].size(1)
         
         # Combine all heads
         combined = torch.stack(outputs, dim=1)  # [batch, heads, seq, dim]
@@ -3568,7 +3724,7 @@ class VisualizationTools:
         
         # Plot approximation eigenvalues
         if 'approx_eigenvalues' in analysis_results:
-            approx_eigs = analysis_results['approx_eigenvalues'].cpu().numpy()
+            approx_eigs = analysis_results['approx_eigenvalues'].detach().cpu().numpy()
             axes[0, 0].plot(approx_eigs, 'o-')
             axes[0, 0].set_title("Approximation Eigenvalues")
             axes[0, 0].set_xlabel("Index")
@@ -3589,7 +3745,7 @@ class VisualizationTools:
             # Plot first few levels of detail eigenvalues
             colors = ['b', 'r', 'g', 'c', 'm']
             for i, level_eigs in enumerate(analysis_results['detail_eigenvalues'][:min(5, len(analysis_results['detail_eigenvalues']))]):
-                level_eigs = level_eigs.cpu().numpy()
+                level_eigs = level_eigs.detach().cpu().numpy()
                 color = colors[i % len(colors)]
                 axes[0, 1].plot(level_eigs, 'o-', color=color, label=f"Level {i+1}")
             

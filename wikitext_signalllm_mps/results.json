@@ -1,0 +1,16 @@
+{
+  "train_losses": [
+    2.717952569325765
+  ],
+  "val_losses": [
+    2.5604190826416016
+  ],
+  "perplexities": [
+    12.941239628154136
+  ],
+  "test_loss": 2.5604190826416016,
+  "test_perplexity": 12.941239628154136,
+  "best_perplexity": 12.941239628154136,
+  "num_parameters": 2323696,
+  "vocab_size": 29
+}
