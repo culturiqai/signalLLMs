@@ -1,0 +1,77 @@
+% CVPR style file for the SignalLLM paper
+% Based on standard CVPR formatting
+
+\usepackage{times}
+\usepackage{epsfig}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{color}
+
+% Page layout
+\setlength{\topmargin}{-0.25in}
+\setlength{\textheight}{9.0in}
+\setlength{\textwidth}{6.5in}
+\setlength{\columnsep}{0.25in}
+\setlength{\oddsidemargin}{0.0in}
+\setlength{\evensidemargin}{0.0in}
+
+% Title formatting
+\def\maketitle{
+ \twocolumn[{
+   \begin{center}
+    {\Large\bf \@title}
+    \vskip 0.3in
+    {\large\@author}
+   \end{center}
+   \vskip 0.2in
+  }]
+}
+
+% Section formatting
+\renewcommand{\section}{\@startsection{section}{1}{\z@}
+               {-3.5ex plus -1ex minus -.2ex}
+               {2.3ex plus .2ex}
+               {\normalfont\large\bfseries}}
+\renewcommand{\subsection}{\@startsection{subsection}{2}{\z@}
+               {-3.25ex plus -1ex minus -.2ex}
+               {1.5ex plus .2ex}
+               {\normalfont\normalsize\bfseries}}
+\renewcommand{\subsubsection}{\@startsection{subsubsection}{3}{\z@}
+               {-3.25ex plus -1ex minus -.2ex}
+               {1.5ex plus .2ex}
+               {\normalfont\normalsize\bfseries}}
+
+% Float placement parameters
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.85}
+\renewcommand{\textfraction}{0.15}
+\renewcommand{\floatpagefraction}{0.8}
+
+% Caption formatting
+\long\def\@makecaption#1#2{
+  \vskip 10pt
+  \setbox\@tempboxa\hbox{#1. #2}
+  \ifdim \wd\@tempboxa >\hsize
+    \hbox to\hsize{#1. #2\hfil}
+  \else
+    \hbox to\hsize{\hfil\box\@tempboxa\hfil}
+  \fi
+}
+
+% Bibliography formatting
+\def\thebibliography#1{
+  \section*{References}
+  \list{[{\small \arabic{enumi}}]}{\settowidth\labelwidth{[#1]}\leftmargin\labelwidth \advance\leftmargin\labelsep \usecounter{enumi}}
+  \def\newblock{\hskip .11em plus .33em minus -.07em}
+  \sloppy\clubpenalty4000\widowpenalty4000
+  \sfcode`\.=1000\relax
+}
+
+% Miscellaneous
+\flushbottom
+\sloppy
+
+\def\copyright{\copyright}
+
+\pagestyle{empty} 
