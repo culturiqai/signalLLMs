@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+*_env/
+signalllm_env/
+signalllm_venv/
+
+# IDE-specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Output directories and files
+outputs/
+*.log
+*.pkl
+*.pt
+*.pth
+
+# LaTeX compilation files
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.synctex.gz
+_minted*/
+
+# Large data directories
+wikitext103_signalllm/debug/
+data/wikitext/
+
+# Miscellaneous
+.DS_Store
+.ipynb_checkpoints/ 
+.ref_files/
+.work_docs/
+.cursorignore

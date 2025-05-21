@@ -1,0 +1,43 @@
+{
+  "computational": [],
+  "memory": [
+    {
+      "model_type": "standard",
+      "seq_lengths": [
+        64,
+        128,
+        256
+      ],
+      "peak_memory_mb": [
+        null,
+        null,
+        null
+      ],
+      "model_size_mb": [
+        3.528228759765625,
+        3.559478759765625,
+        3.621978759765625
+      ]
+    },
+    {
+      "model_type": "signal",
+      "seq_lengths": [
+        64,
+        128,
+        256
+      ],
+      "peak_memory_mb": [
+        null,
+        null,
+        null
+      ],
+      "model_size_mb": [
+        5.938655853271484,
+        5.969905853271484,
+        6.032405853271484
+      ]
+    }
+  ],
+  "parameter": null,
+  "nlp": []
+}
