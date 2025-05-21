@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SignalLLM Benchmark Results</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { color: #2c3e50; }
+        h2 { color: #3498db; }
+        .result-section { margin-bottom: 30px; }
+        .plot-container { margin: 20px 0; text-align: center; }
+        table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f2f2f2; }
+        tr:hover { background-color: #f5f5f5; }
+        .note { background-color: #f8f9fa; padding: 15px; border-left: 4px solid #3498db; margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <h1>SignalLLM Benchmark Results</h1>
+    
+    <div class="note">
+        <h3>Implementation Status</h3>
+        <p>Currently, two of the four planned benchmarks have been successfully implemented and visualized. 
+        The computational complexity and NLP task performance benchmarks require additional development to address
+        tensor dimension and wavelet transform implementation issues.</p>
+    </div>
+    
+    <div class="result-section">
+        <h2>1. Memory Usage</h2>
+        <p>This section compares the memory efficiency of SignalLLM with standard Transformers.</p>
+        <div class="plot-container">
+            <img src="memory_usage.png" alt="Memory Usage" style="max-width: 100%;">
+        </div>
+    </div>
+    
+    <div class="result-section">
+        <h2>2. Parameter Efficiency</h2>
+        <p>This section demonstrates the parameter reduction achieved by spectral embeddings compared to standard embeddings.</p>
+        <div class="plot-container">
+            <img src="parameter_efficiency.png" alt="Parameter Efficiency" style="max-width: 100%;">
+        </div>
+        <p>As shown in the charts, SignalLLM achieves an 8x reduction in parameters for embedding layers across all vocabulary sizes tested.</p>
+    </div>
+    
+    <div class="result-section">
+        <h2>Pending Benchmarks</h2>
+        <p>The following benchmarks are currently being developed:</p>
+        <ol>
+            <li><strong>Computational Complexity</strong>: Will demonstrate O(n log n) vs O(n²) scaling</li>
+            <li><strong>NLP Task Performance</strong>: Will compare language modeling capabilities</li>
+        </ol>
+        <p>These benchmarks have implementation issues documented in the ISSUES.md file as contribution opportunities.</p>
+    </div>
+</body>
+</html>
+    

@@ -55,8 +55,15 @@ class StandardTransformer(nn.Module):
         # Initialize position encodings
         position = torch.arange(0, self.pos_encoding.size(1), dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, self.embed_dim, 2).float() * (-np.log(10000.0) / self.embed_dim))
-        self.pos_encoding[0, :, 0::2] = torch.sin(position * div_term)
-        self.pos_encoding[0, :, 1::2] = torch.cos(position * div_term)
+        
+        # Create a temporary tensor and then assign to pos_encoding to avoid in-place operation on leaf variable
+        pos_encoding = torch.zeros_like(self.pos_encoding.data)
+        pos_encoding[0, :, 0::2] = torch.sin(position * div_term)
+        pos_encoding[0, :, 1::2] = torch.cos(position * div_term)
+        self.pos_encoding.data.copy_(pos_encoding)
+        
+        # Alternatively, make pos_encoding not require gradients
+        # self.pos_encoding = nn.Parameter(self.pos_encoding, requires_grad=False)
     
     def forward(self, x):
         # Create a mask to prevent attention to padding tokens
