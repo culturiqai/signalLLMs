@@ -6,6 +6,7 @@ import torch.nn as nn
 import numpy as np
 import math
 from typing import Tuple, List, Dict, Optional, Any, Union
+import os
 
 class MPSWaveletTransform(nn.Module):
     """
@@ -96,7 +97,16 @@ class MPSWaveletTransform(nn.Module):
         return x[:, ::2, :]
     
     def _conv1d_mps(self, x: torch.Tensor, filter_bank: torch.Tensor) -> torch.Tensor:
-        """Optimized 1D convolution for MPS"""
+        """
+        Optimized 1D convolution using MPS (Metal Performance Shaders)
+        
+        Args:
+            x: Input tensor [batch_size, seq_length, embed_dim]
+            filter_bank: Filter coefficients [filter_length] or [1, filter_length]
+            
+        Returns:
+            Convolution result [batch_size, seq_length, embed_dim]
+        """
         # Ensure inputs are on the correct device
         if filter_bank.device != x.device:
             filter_bank = filter_bank.to(x.device)
@@ -105,10 +115,17 @@ class MPSWaveletTransform(nn.Module):
         batch_size, seq_length, embed_dim = x.shape
         x_reshaped = x.transpose(1, 2)  # [batch, embed, seq]
         
-        # Prepare filter - instead of repeating, we'll use group convolution properly
-        # The filter shape should be [embed_dim, 1, filter_length]
-        # where groups=embed_dim means each channel gets its own filter
-        filter_expanded = filter_bank.expand(embed_dim, -1, -1)
+        # Fix for dimension error: ensure filter_bank has correct dimensions before expanding
+        # The correct shape should be [1, 1, filter_length] before expansion
+        if filter_bank.dim() == 1:
+            # If 1D tensor, add two dimensions
+            filter_bank = filter_bank.unsqueeze(0).unsqueeze(0)
+        elif filter_bank.dim() == 2:
+            # If 2D tensor, add one dimension
+            filter_bank = filter_bank.unsqueeze(0)
+        
+        # Now safely expand to [embed_dim, 1, filter_length]
+        filter_expanded = filter_bank.expand(embed_dim, 1, -1)
         
         # Apply convolution across sequence dimension using MPS-optimized conv1d
         # Use groups=embed_dim to apply the same filter to each channel independently
@@ -206,6 +223,19 @@ class MPSWaveletTransform(nn.Module):
         # For very short sequences, use FFT-based method which is more robust for small sizes
         if seq_length < 16:
             return self.fft_forward(x)
+            
+        # Validate filter dimensions early to prevent later errors
+        if self.dec_lo.dim() == 1:
+            self.dec_lo = self.dec_lo.unsqueeze(0).unsqueeze(0)
+            self.dec_hi = self.dec_hi.unsqueeze(0).unsqueeze(0)
+        elif self.dec_lo.dim() == 2:
+            self.dec_lo = self.dec_lo.unsqueeze(0)
+            self.dec_hi = self.dec_hi.unsqueeze(0)
+            
+        # If filters are not on the correct device, move them
+        if self.dec_lo.device != x.device:
+            self.dec_lo = self.dec_lo.to(x.device)
+            self.dec_hi = self.dec_hi.to(x.device)
         
         # Calculate expected output sizes for each level
         # This makes the transform more precise and matches what PyWavelets expects
@@ -227,13 +257,18 @@ class MPSWaveletTransform(nn.Module):
             # Pad signal for convolution
             padded = self._pad_signal(approx)
             
-            # Apply low-pass and high-pass filters
-            approx_coeffs = self._conv1d_mps(padded, self.dec_lo)
-            detail = self._conv1d_mps(padded, self.dec_hi)
-            
-            # Downsample - adjust to use expected sizes
-            approx_coeffs = self._downsample(approx_coeffs)
-            detail = self._downsample(detail)
+            try:
+                # Apply low-pass and high-pass filters with error handling
+                approx_coeffs = self._conv1d_mps(padded, self.dec_lo)
+                detail = self._conv1d_mps(padded, self.dec_hi)
+                
+                # Downsample - adjust to use expected sizes
+                approx_coeffs = self._downsample(approx_coeffs)
+                detail = self._downsample(detail)
+            except RuntimeError as e:
+                print(f"Warning: MPS wavelet transform failed at level {level}: {str(e)}")
+                print(f"Falling back to FFT method")
+                return self.fft_forward(x)
             
             # If actual size differs from expected, resize
             expected_size = expected_sizes[level]
@@ -466,8 +501,18 @@ class MPSWaveletTransform(nn.Module):
         return output
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-        """Apply wavelet transform using the most efficient implementation"""
-        return self.forward_optimized(x)
+        """Forward pass of the wavelet transform"""
+        try:
+            # Disable debug output if environment variable is set
+            if os.environ.get('SIGNALLLM_DISABLE_DEBUG', '0') == '1':
+                return self.forward_optimized(x)
+                
+            # First try optimized version
+            return self.forward_optimized(x)
+        except Exception as e:
+            print(f"MPS wavelet transform failed, falling back to FFT: {str(e)}")
+            # Fallback to FFT method without saving debug info
+            return self.fft_forward(x)
     
     def inverse(self, approx: torch.Tensor, details: List[torch.Tensor]) -> torch.Tensor:
         """Apply inverse wavelet transform using the most efficient implementation"""
