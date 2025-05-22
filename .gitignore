@@ -16,6 +16,7 @@ venv/
 ENV/
 *_env/
 signalllm_env/
+signalllm_venv/
 
 # IDE-specific files
 .idea/
@@ -25,10 +26,23 @@ signalllm_env/
 
 # Output directories and files
 outputs/
+logs/
 *.log
 *.pkl
 *.pt
 *.pth
+checkpoint*/
+checkpoint_*/
+*checkpoint*.pt
+best_model*.pt
+final_model*.pt
+debug/
+*.arrow
+
+# Model directories
+wikitext*/
+wikitext*_*/
+*signalllm*/
 
 # LaTeX compilation files
 *.aux
@@ -39,6 +53,11 @@ outputs/
 *.toc
 *.synctex.gz
 _minted*/
+
+# Large data directories
+data/
+wikitext103_signalllm/debug/
+wikitext103_signalllm_fixed/
 
 # Miscellaneous
 .DS_Store
