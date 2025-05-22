@@ -31,6 +31,12 @@ from typing import Dict, Any, Optional, List
 # Configure debug mode
 DEBUG = True
 
+# Notes on metrics calculation:
+# - Perplexity (PPL) is correctly calculated as exp(average_loss) not average(exp(loss))
+# - The dataset now uses non-overlapping sequences to prevent data leakage
+# - Loss and accuracy are weighted by token count for proper averaging
+# - Accuracy is less important than perplexity for language modeling tasks
+
 # Import SignalLLM implementation
 from signalllm_hrfevo_poc import Config, SignalLLM, HRFEvoController
 
@@ -104,7 +110,8 @@ class WikiText103Dataset(Dataset):
         
         # Create samples of sequence_length
         self.samples = []
-        for i in range(0, len(self.all_tokens) - seq_length - 1, seq_length // 2):
+        # Use non-overlapping sequences (stride = seq_length instead of seq_length//2)
+        for i in range(0, len(self.all_tokens) - seq_length - 1, seq_length):
             self.samples.append(i)
         
         logger.info(f"Created {len(self.samples)} samples from {split} split")
@@ -404,9 +411,9 @@ def train_wikitext103(args):
             # Training phase
             model.train()
             train_loss = 0.0
-            train_ppl = 0.0
             train_accuracy = 0.0
             train_batches = 0
+            train_total_tokens = 0
             
             # Progress bar
             progress_bar = tqdm(enumerate(train_loader), total=len(train_loader),
@@ -519,16 +526,17 @@ def train_wikitext103(args):
                         total = targets.numel()
                         accuracy = correct / total
                         
-                        train_loss += loss.item()
-                        train_accuracy += accuracy
+                        train_loss += loss.item() * total  # Weight by tokens
+                        train_accuracy += accuracy * total  # Weight by tokens
                         train_batches += 1
+                        train_total_tokens += total
                         
-                        current_ppl = torch.exp(torch.tensor(loss.item())).item()
-                        train_ppl += current_ppl
+                        current_loss = loss.item()
+                        current_ppl = torch.exp(torch.tensor(current_loss)).item()
                     
                     # Update progress bar
                     progress_bar.set_postfix({
-                        'loss': loss.item(),
+                        'loss': current_loss,
                         'ppl': current_ppl,
                         'acc': accuracy,
                         'lr': scheduler.get_last_lr()[0]
@@ -611,6 +619,7 @@ def train_wikitext103(args):
                             model, optimizer, scheduler, hrfevo_controller,
                             epoch, global_step, history, step_checkpoint_path
                         )
+                
                 except Exception as e:
                     error = log_exception(e, f"training batch {batch_idx}")
                     logger.error(f"Error processing batch {batch_idx}: {error}")
@@ -631,17 +640,17 @@ def train_wikitext103(args):
                     continue
             
             # Calculate epoch metrics
-            epoch_train_loss = train_loss / max(train_batches, 1)
-            epoch_train_ppl = train_ppl / max(train_batches, 1)
-            epoch_train_accuracy = train_accuracy / max(train_batches, 1)
+            epoch_train_loss = train_loss / max(train_total_tokens, 1)
+            epoch_train_ppl = torch.exp(torch.tensor(epoch_train_loss)).item()
+            epoch_train_accuracy = train_accuracy / max(train_total_tokens, 1)
             epoch_time = time.time() - epoch_start_time
             
             # Validation phase
             model.eval()
             val_loss = 0.0
-            val_ppl = 0.0
             val_accuracy = 0.0
             val_batches = 0
+            val_total_tokens = 0  # Track total number of tokens for proper weighting
             
             with torch.no_grad():
                 for inputs, targets in tqdm(val_loader, desc="Validation"):
@@ -661,10 +670,13 @@ def train_wikitext103(args):
                         total = targets.numel()
                         accuracy = correct / total
                         
-                        val_loss += loss.item()
-                        val_accuracy += accuracy
+                        # Note: This accuracy metric only measures exact matches of the highest probability token
+                        # It doesn't fully capture the quality of the probabilistic distribution, which is better
+                        # reflected by perplexity. For language modeling, perplexity is the primary metric.
+                        val_loss += loss.item() * total  # Weight loss by number of tokens
+                        val_accuracy += accuracy * total  # Weight accuracy by number of tokens
                         val_batches += 1
-                        val_ppl += torch.exp(torch.tensor(loss.item())).item()
+                        val_total_tokens += total
                     except Exception as e:
                         error = log_exception(e, "validation batch")
                         logger.error(f"Error in validation: {error}")
@@ -672,9 +684,9 @@ def train_wikitext103(args):
                         continue
             
             # Calculate validation metrics
-            epoch_val_loss = val_loss / max(val_batches, 1)
-            epoch_val_ppl = val_ppl / max(val_batches, 1)
-            epoch_val_accuracy = val_accuracy / max(val_batches, 1)
+            epoch_val_loss = val_loss / max(val_total_tokens, 1)  # Properly weighted average loss
+            epoch_val_ppl = torch.exp(torch.tensor(epoch_val_loss)).item()  # Compute perplexity from average loss
+            epoch_val_accuracy = val_accuracy / max(val_total_tokens, 1)  # Properly weighted average accuracy
             
             # Print epoch summary
             logger.info(f"Epoch {epoch+1}/{args.epochs} - Time: {epoch_time:.2f}s")
@@ -731,9 +743,9 @@ def train_wikitext103(args):
         # Evaluate on test set
         model.eval()
         test_loss = 0.0
-        test_ppl = 0.0
         test_accuracy = 0.0
         test_batches = 0
+        test_total_tokens = 0
         
         with torch.no_grad():
             for inputs, targets in tqdm(test_loader, desc="Testing"):
@@ -753,10 +765,10 @@ def train_wikitext103(args):
                     total = targets.numel()
                     accuracy = correct / total
                     
-                    test_loss += loss.item()
-                    test_accuracy += accuracy
+                    test_loss += loss.item() * total  # Weight by tokens
+                    test_accuracy += accuracy * total  # Weight by tokens
                     test_batches += 1
-                    test_ppl += torch.exp(torch.tensor(loss.item())).item()
+                    test_total_tokens += total
                 except Exception as e:
                     error = log_exception(e, "test batch")
                     logger.error(f"Error in test evaluation: {error}")
@@ -764,9 +776,9 @@ def train_wikitext103(args):
                     continue
         
         # Calculate test metrics
-        epoch_test_loss = test_loss / max(test_batches, 1)
-        epoch_test_ppl = test_ppl / max(test_batches, 1)
-        epoch_test_accuracy = test_accuracy / max(test_batches, 1)
+        epoch_test_loss = test_loss / max(test_total_tokens, 1)
+        epoch_test_ppl = torch.exp(torch.tensor(epoch_test_loss)).item()
+        epoch_test_accuracy = test_accuracy / max(test_total_tokens, 1)
         
         # Print test summary
         logger.info(f"Test - Loss: {epoch_test_loss:.4f}, PPL: {epoch_test_ppl:.2f}, Acc: {epoch_test_accuracy:.4f}")
