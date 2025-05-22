@@ -49,10 +49,16 @@ class MPSWaveletTransform(nn.Module):
             # Learnable filters initialized with standard coefficients
             self.dec_lo = nn.Parameter(torch.tensor(coeffs['dec_lo'], dtype=torch.float32).view(1, 1, -1))
             self.dec_hi = nn.Parameter(torch.tensor(coeffs['dec_hi'], dtype=torch.float32).view(1, 1, -1))
+            # Add reconstruction filters (time-reversed decomposition filters)
+            self.rec_lo = nn.Parameter(torch.tensor(coeffs['dec_lo'][::-1], dtype=torch.float32).view(1, 1, -1))
+            self.rec_hi = nn.Parameter(torch.tensor(coeffs['dec_hi'][::-1], dtype=torch.float32).view(1, 1, -1))
         else:
             # Fixed filters
             self.register_buffer('dec_lo', torch.tensor(coeffs['dec_lo'], dtype=torch.float32).view(1, 1, -1))
             self.register_buffer('dec_hi', torch.tensor(coeffs['dec_hi'], dtype=torch.float32).view(1, 1, -1))
+            # Add reconstruction filters (time-reversed decomposition filters)
+            self.register_buffer('rec_lo', torch.tensor(coeffs['dec_lo'][::-1], dtype=torch.float32).view(1, 1, -1))
+            self.register_buffer('rec_hi', torch.tensor(coeffs['dec_hi'][::-1], dtype=torch.float32).view(1, 1, -1))
         
         # Pre-calculated filter lengths for performance
         self.filter_len = len(coeffs['dec_lo'])
@@ -99,6 +105,7 @@ class MPSWaveletTransform(nn.Module):
     def _conv1d_mps(self, x: torch.Tensor, filter_bank: torch.Tensor) -> torch.Tensor:
         """
         Optimized 1D convolution using MPS (Metal Performance Shaders)
+        Fixed to handle even-length filters properly with MPS backend
         
         Args:
             x: Input tensor [batch_size, seq_length, embed_dim]
@@ -124,16 +131,27 @@ class MPSWaveletTransform(nn.Module):
             # If 2D tensor, add one dimension
             filter_bank = filter_bank.unsqueeze(0)
         
+        # Get filter length for manual padding calculation
+        filter_length = filter_bank.size(-1)
+        
+        # MPS-compatible manual padding calculation
+        # For 'same' padding: total_pad = filter_length - 1
+        total_pad = filter_length - 1
+        pad_left = total_pad // 2
+        pad_right = total_pad - pad_left
+        
+        # Apply manual padding before convolution
+        x_padded = torch.nn.functional.pad(x_reshaped, (pad_left, pad_right), mode='reflect')
+        
         # Now safely expand to [embed_dim, 1, filter_length]
         filter_expanded = filter_bank.expand(embed_dim, 1, -1)
         
-        # Apply convolution across sequence dimension using MPS-optimized conv1d
-        # Use groups=embed_dim to apply the same filter to each channel independently
+        # Apply convolution with no padding (since we manually padded)
         output = torch.nn.functional.conv1d(
-            x_reshaped,
+            x_padded,
             filter_expanded,
             groups=embed_dim,
-            padding='same'
+            padding=0  # No padding needed since we manually padded
         )
         
         # Reshape back to original format

@@ -1,0 +1,9 @@
+{
+  "after_fix": {
+    "date": "2025-05-23",
+    "seq_length": 512,
+    "batch_size": 8,
+    "total_samples": 230079,
+    "steps_per_epoch": 28760
+  }
+}

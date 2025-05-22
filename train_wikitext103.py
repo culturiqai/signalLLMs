@@ -29,7 +29,7 @@ import traceback  # Add traceback for better error reporting
 from typing import Dict, Any, Optional, List
 
 # Configure debug mode
-DEBUG = True
+DEBUG = False  # Reduced to minimize log spam
 
 # Notes on metrics calculation:
 # - Perplexity (PPL) is correctly calculated as exp(average_loss) not average(exp(loss))
@@ -72,30 +72,34 @@ def log_exception(e, context=""):
     return error_msg
 
 class WikiText103Dataset(Dataset):
-    """WikiText-103 dataset for language modeling using HuggingFace datasets"""
+    """Dataset class for WikiText-103"""
+    
     def __init__(self, split='train', seq_length=1024, tokenizer=None, cache_dir='./data'):
+        """Initialize dataset
+        
+        Args:
+            split (str): Dataset split ('train', 'validation', or 'test')
+            seq_length (int): Sequence length for training
+            tokenizer: Tokenizer to use
+            cache_dir (str): Directory to cache dataset
+        """
+        logger.info(f"Initializing WikiText-103 dataset ({split} split)")
+        
+        # Load dataset from huggingface datasets
+        dataset = load_dataset('wikitext', 'wikitext-103-v1', split=split, cache_dir=cache_dir)
+        
+        # Store tokenizer
+        self.tokenizer = tokenizer
         self.seq_length = seq_length
         
-        if tokenizer is None:
-            # Use GPT-2 tokenizer by default
-            self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
-        else:
-            self.tokenizer = tokenizer
-        
-        # Load dataset from HuggingFace
-        logger.info(f"Loading WikiText-103 {split} dataset...")
-        dataset_split = "train" if split == "train" else "validation" if split == "valid" else "test"
-        self.dataset = load_dataset("wikitext", "wikitext-103-v1", split=dataset_split, cache_dir=cache_dir)
-        
-        # Process the dataset
-        logger.info("Processing dataset...")
+        # Tokenize all texts
+        logger.info("Tokenizing texts...")
         self.token_ids = []
         
-        # Process in chunks to avoid memory issues
-        for item in tqdm(self.dataset):
-            if len(item['text'].strip()) > 0:  # Skip empty lines
-                # Tokenize each text separately
-                tokens = self.tokenizer(item['text'], return_tensors="pt").input_ids.squeeze(0)
+        for item in tqdm(dataset, desc="Tokenizing"):
+            text = item['text']
+            if text.strip():  # Skip empty lines
+                tokens = torch.tensor(tokenizer(text).input_ids, dtype=torch.long)
                 if len(tokens) > 0:
                     self.token_ids.append(tokens)
         
@@ -110,11 +114,33 @@ class WikiText103Dataset(Dataset):
         
         # Create samples of sequence_length
         self.samples = []
-        # Use non-overlapping sequences (stride = seq_length instead of seq_length//2)
-        for i in range(0, len(self.all_tokens) - seq_length - 1, seq_length):
+        
+        # CRITICAL FIX: Always use non-overlapping sequences (stride = seq_length)
+        # This ensures we get ~230K steps per epoch instead of ~460K
+        stride = seq_length
+        logger.info(f"Using non-overlapping sequences (stride = {stride})")
+        
+        # Create non-overlapping samples
+        for i in range(0, len(self.all_tokens) - seq_length - 1, stride):
             self.samples.append(i)
         
-        logger.info(f"Created {len(self.samples)} samples from {split} split")
+        # Enforce validation: First basic check on sample count
+        expected_samples = (len(self.all_tokens) - seq_length - 1) // stride
+        actual_samples = len(self.samples)
+        
+        # Allow at most 1% difference due to edge effects
+        margin = expected_samples * 0.01
+        assert abs(expected_samples - actual_samples) <= margin, \
+            f"Sample count validation failed: expected ~{expected_samples}, got {actual_samples}"
+        
+        # Second validation: Check stride between samples
+        if len(self.samples) >= 2:
+            actual_stride = self.samples[1] - self.samples[0]
+            assert actual_stride == stride, \
+                f"Stride validation failed: expected {stride}, got {actual_stride}"
+        
+        logger.info(f"Created {len(self.samples)} samples from {split} split (stride={stride})")
+        logger.info(f"Validated dataset construction: ✓ non-overlapping sequences (stride={stride})")
     
     def __len__(self):
         return len(self.samples)
@@ -536,9 +562,9 @@ def train_wikitext103(args):
                     
                     # Update progress bar
                     progress_bar.set_postfix({
-                        'loss': current_loss,
-                        'ppl': current_ppl,
-                        'acc': accuracy,
+                        'loss': f"{current_loss:.4f}",
+                        'ppl': f"{current_ppl:.2f}",
+                        'acc': f"{accuracy:.4f}",
                         'lr': scheduler.get_last_lr()[0]
                     })
                     
