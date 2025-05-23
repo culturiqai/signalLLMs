@@ -1,6 +1,6 @@
-# SignalLLM: Research Preview
+# SpectrallLLMs: Research Preview
 
-This repository contains a research implementation of SignalLLM with HRFEvo, a novel approach to language modeling that leverages techniques from signal processing to achieve significant computational and parameter efficiency.
+This repository contains a research implementation of SpectrallLLM with HRFEvo, a novel approach to language modeling that leverages techniques from signal processing to achieve significant computational and parameter efficiency.
 
 ## Key Innovations
 
@@ -11,7 +11,7 @@ This repository contains a research implementation of SignalLLM with HRFEvo, a n
 
 ## Mathematical Foundations
 
-SignalLLM reconceptualizes language as signals in a frequency domain, enabling several theoretical advantages:
+SpectrallLLM reconceptualizes language as signals in a frequency domain, enabling several theoretical advantages:
 
 ### Frequency Domain Attention
 
